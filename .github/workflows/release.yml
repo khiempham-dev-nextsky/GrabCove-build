@@ -1,0 +1,192 @@
+name: Build signed release
+
+on:
+  repository_dispatch:
+    types:
+      - build-release
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Private GrabCove tag to build
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: public-release-${{ github.event.client_payload.tag || inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target_key }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target_key: darwin-aarch64
+            rust_target: aarch64-apple-darwin
+            bundles: app,dmg
+          - runner: macos-15-intel
+            target_key: darwin-x86_64
+            rust_target: x86_64-apple-darwin
+            bundles: app,dmg
+          - runner: windows-2025
+            target_key: windows-x86_64
+            rust_target: x86_64-pc-windows-msvc
+            bundles: nsis
+    runs-on: ${{ matrix.runner }}
+    env:
+      PYTHONUTF8: "1"
+      RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+      SOURCE_SHA: ${{ github.event.client_payload.source_sha || '' }}
+    steps:
+      - name: Check out private GrabCove source
+        uses: actions/checkout@v5
+        with:
+          repository: khiempham-dev-nextsky/GrabCove
+          ref: ${{ env.RELEASE_TAG }}
+          token: ${{ secrets.PRIVATE_SOURCE_READ }}
+
+      - name: Verify dispatched source commit
+        if: github.event_name == 'repository_dispatch'
+        shell: bash
+        run: |
+          actual="$(git rev-parse HEAD)"
+          if [[ "$actual" != "$SOURCE_SHA" ]]; then
+            echo "Source SHA mismatch: expected $SOURCE_SHA, checked out $actual" >&2
+            exit 1
+          fi
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.3.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install Rust target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: scripts/fetch_ytdlp.py
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify tag matches every version source
+        run: node scripts/verify-release-tag.mjs "$RELEASE_TAG"
+
+      - name: Run frontend and release-script tests
+        shell: bash
+        run: |
+          pnpm test
+          pnpm test:scripts
+          pnpm test:python
+          pnpm build
+
+      - name: Fetch bundled yt-dlp binary
+        shell: bash
+        run: python scripts/fetch_ytdlp.py
+
+      - name: Verify production cookie extraction against real Chrome
+        if: matrix.target_key == 'windows-x86_64'
+        shell: pwsh
+        run: |
+          $chrome = "$env:PROGRAMFILES\Google\Chrome\Application\chrome.exe"
+          if (-not (Test-Path $chrome)) {
+            $chrome = "${env:PROGRAMFILES(X86)}\Google\Chrome\Application\chrome.exe"
+          }
+          if (-not (Test-Path $chrome)) { throw "Google Chrome is unavailable" }
+          $profile = Join-Path $env:RUNNER_TEMP "ttk-cdp-profile"
+          Start-Process -FilePath $chrome -ArgumentList @(
+            "--headless=new",
+            "--user-data-dir=$profile",
+            "--remote-debugging-port=9333",
+            "--remote-debugging-address=127.0.0.1",
+            "--no-first-run",
+            "https://www.tiktok.com/"
+          )
+          node scripts/seed-cdp-cookie.mjs 9333
+          $env:TTK_CDP_PORT = "9333"
+          cargo test --manifest-path src-tauri/Cargo.toml --test cdp_cookie live_chrome_cookie_is_read_through_production_cdp_path -- --ignored --exact
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Read release version
+        id: release
+        shell: bash
+        run: echo "version=${RELEASE_TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build signed Tauri bundles
+        run: pnpm tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+
+      - name: Collect and version release artifacts
+        run: node scripts/collect-release-artifacts.mjs --bundle "src-tauri/target/${{ matrix.rust_target }}/release/bundle" --output release-assets --target "${{ matrix.target_key }}" --version "${{ steps.release.outputs.version }}"
+
+      - name: Upload immutable build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target_key }}
+          path: release-assets/${{ matrix.target_key }}
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish complete release
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.event.client_payload.tag || inputs.tag }}
+    steps:
+      - name: Check out private GrabCove source
+        uses: actions/checkout@v5
+        with:
+          repository: khiempham-dev-nextsky/GrabCove
+          ref: ${{ env.RELEASE_TAG }}
+          token: ${{ secrets.PRIVATE_SOURCE_READ }}
+
+      - name: Install Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Download every successful target
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: downloaded
+          merge-multiple: false
+
+      - name: Build fail-closed latest.json
+        shell: bash
+        run: |
+          version="${RELEASE_TAG#v}"
+          node scripts/build-update-manifest.mjs --assets downloaded --version "$version" --notes "Release $RELEASE_TAG" --pub-date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" --output downloaded/latest.json
+
+      - name: Publish public GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.RELEASES_TOKEN }}
+        run: |
+          mapfile -d '' release_files < <(find downloaded -type f \( -name 'latest.json' -o -name '*.dmg' -o -name '*.app.tar.gz' -o -name '*.exe' \) -print0)
+          if [[ "${#release_files[@]}" -ne 6 ]]; then
+            echo "Expected exactly 6 public release files, found ${#release_files[@]}" >&2
+            exit 1
+          fi
+          gh release create "$RELEASE_TAG" "${release_files[@]}" --repo khiempham-dev-nextsky/GrabCove-releases --title "GrabCove $RELEASE_TAG" --notes "Release $RELEASE_TAG" --latest

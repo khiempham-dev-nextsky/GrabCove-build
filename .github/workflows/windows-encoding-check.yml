@@ -1,0 +1,42 @@
+name: Windows encoding check
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Private GrabCove branch or tag to check
+        required: true
+        default: master
+        type: string
+
+permissions: {}
+
+jobs:
+  check:
+    name: Check worker UTF-8 on Windows
+    runs-on: windows-2025
+    steps:
+      - name: Check out private GrabCove source
+        uses: actions/checkout@v5
+        with:
+          repository: khiempham-dev-nextsky/GrabCove
+          ref: ${{ inputs.ref }}
+          token: ${{ secrets.PRIVATE_SOURCE_READ }}
+
+      - name: Install Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pytest
+        run: python -m pip install pytest
+
+      - name: Run worker encoding tests
+        run: python -m pytest worker/tests/test_cli.py -q
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Run Rust worker spawn test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib translation::worker::tests::result_event_payload_is_the_terminal_value
+
