@@ -83,12 +83,21 @@ jobs:
           cache-dependency-path: scripts/fetch_ytdlp.py
 
       - name: Install worker test dependencies
-        run: python -m pip install pytest numpy
+        run: python -m pip install pytest numpy "rapidocr>=3.9" "onnxruntime>=1.27"
+
+      - name: Install FFmpeg on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          if ! command -v ffprobe >/dev/null 2>&1; then
+            brew install ffmpeg
+          fi
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
       - name: Verify tag matches every version source
+        shell: bash
         run: node scripts/verify-release-tag.mjs "$RELEASE_TAG"
 
       - name: Run frontend and release-script tests
