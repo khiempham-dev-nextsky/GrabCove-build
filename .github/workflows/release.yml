@@ -82,6 +82,9 @@ jobs:
           cache: pip
           cache-dependency-path: scripts/fetch_ytdlp.py
 
+      - name: Install worker test dependencies
+        run: python -m pip install pytest numpy
+
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
 
