@@ -83,15 +83,37 @@ jobs:
           cache-dependency-path: scripts/fetch_ytdlp.py
 
       - name: Install worker test dependencies
-        run: python -m pip install pytest numpy "rapidocr>=3.9" "onnxruntime>=1.27"
+        shell: bash
+        run: |
+          python -m pip install pytest numpy "rapidocr>=3.9"
+          if [[ "${{ matrix.target_key }}" == "darwin-x86_64" ]]; then
+            python -m pip install "onnxruntime==1.23.2"
+          else
+            python -m pip install "onnxruntime>=1.27"
+          fi
 
       - name: Install FFmpeg on macOS
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          if ! command -v ffprobe >/dev/null 2>&1; then
-            brew install ffmpeg
-          fi
+          brew install ffmpeg-full
+          ffmpeg_bin="$(brew --prefix ffmpeg-full)/bin"
+          echo "$ffmpeg_bin" >> "$GITHUB_PATH"
+          echo "VVS_FFMPEG=$ffmpeg_bin/ffmpeg" >> "$GITHUB_ENV"
+          echo "VVS_FFPROBE=$ffmpeg_bin/ffprobe" >> "$GITHUB_ENV"
+          "$ffmpeg_bin/ffmpeg" -hide_banner -filters | grep -q subtitles
+
+      - name: Install FFmpeg on Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            winget install --id Gyan.FFmpeg -e --scope user --silent --accept-package-agreements --accept-source-agreements
+          }
+          $ffprobe = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Links\ffprobe.exe"
+          if (-not (Test-Path $ffprobe) -and -not (Get-Command ffprobe -ErrorAction SilentlyContinue)) {
+            throw "FFprobe was not installed"
+          }
 
       - name: Install frontend dependencies
         run: pnpm install --frozen-lockfile
