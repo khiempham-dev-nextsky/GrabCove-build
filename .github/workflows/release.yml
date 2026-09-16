@@ -107,7 +107,21 @@ jobs:
             "tokenizers>=0.20" \
             huggingface-hub \
             PyYAML
-          python -m pip install --no-deps "vieneu==3.3.0" -e "worker[build]"
+          vieneu_version="$(python - <<PY
+          import tomllib
+          from pathlib import Path
+
+          lock = tomllib.loads(Path("worker/uv.lock").read_text(encoding="utf-8"))
+          for package in lock["package"]:
+              if package.get("name") == "vieneu":
+                  print(package["version"])
+                  break
+          else:
+              raise SystemExit("vieneu is missing from worker/uv.lock")
+          PY
+          )"
+          python -m pip install --no-deps "vieneu==$vieneu_version" -e "worker[build]"
+
 
       - name: Install FFmpeg on macOS
         if: runner.os == 'macOS'
@@ -185,6 +199,7 @@ jobs:
         run: pnpm tauri build --target "${{ matrix.rust_target }}" --bundles "${{ matrix.bundles }}"
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          GRABCOVE_WORKER_PREFLIGHT_SKIP_PACKAGES: ${{ matrix.target_key == 'darwin-x86_64' && 'onnxruntime' || '' }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
       - name: Collect and version release artifacts
